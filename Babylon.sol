@@ -1,7 +1,5 @@
-pragma solidity ^0.8.0;
-
-
-
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.11;
 /**
  * SAFEMATH LIBRARY
  */
@@ -393,6 +391,7 @@ contract DividendDistributor is IDividendDistributor {
     }
 }
 
+
 contract Babylon is IBEP20, Auth {
     using SafeMath for uint256;
 
@@ -432,13 +431,8 @@ contract Babylon is IBEP20, Auth {
     uint256 minHoldingDays = 360 ; //~ 1 Year    
     uint256 sellTaxDayFee = 5 ; // 0.05% --> Extra Sales Tax 0% : 0.05% x minHoldingDays
     //
-    struct BuyRecord {
-        uint256 timestamp;
-        uint256 amount;
-    }
-    mapping(address => BuyRecord[]) _buyRecords;
+    mapping(address => uint256) _buyRecords;
     //
-
     address public autoLiquidityReceiver;
     address public marketingFeeReceiver;
 
@@ -448,20 +442,14 @@ contract Babylon is IBEP20, Auth {
     IDEXRouter public router;
     address public pair;
 
-    uint256 public launchedAt;
-    uint256 public launchedAtTimestamp;
-
-    uint256 buybackMultiplierNumerator = 200;
-    uint256 buybackMultiplierDenominator = 100;
-    uint256 buybackMultiplierTriggeredAt;
-    uint256 buybackMultiplierLength = 30 minutes;
-
     bool public autoBuybackEnabled = false;
     mapping (address => bool) buyBacker;
-    uint256 autoBuybackCap;
+    //initail settings
+    uint256 autoBuybackCap = 500 * (10 ** 18);
+    uint256 autoBuybackAmount = 50 * (10 ** 18);
+    uint256 autoBuybackBlockPeriod = 20;
+    //acumlated
     uint256 autoBuybackAccumulator;
-    uint256 autoBuybackAmount;
-    uint256 autoBuybackBlockPeriod;
     uint256 autoBuybackBlockLast;
 
     DividendDistributor distributor;
@@ -511,14 +499,10 @@ contract Babylon is IBEP20, Auth {
     function balanceOf(address account) public view override returns (uint256) { return _balances[account]; }
     function allowance(address holder, address spender) external view override returns (uint256) { return _allowances[holder][spender]; }
 
-    function getBuyRecords(address account) external view  returns (uint256[] memory , uint256[] memory) { 
-        uint256[]    memory timestamps = new uint256[](_buyRecords[account].length);
-        uint256[]    memory amounts    = new uint256[](_buyRecords[account].length);
-        for (uint i = 0; i < _buyRecords[account].length; i++) {
-            timestamps[i] = _buyRecords[account][i].timestamp;
-            amounts[i] = _buyRecords[account][i].amount;
-        }
-       return (timestamps,amounts);
+    function getBuyRecords(address account) external view  returns (uint256 , uint256) { 
+        uint256 currentBalance   = _balances[account];        
+        uint256 lastTimeStamp    = _buyRecords[account] ;
+        return (currentBalance,lastTimeStamp);
      }
 
     function approve(address spender, uint256 amount) public override returns (bool) {
@@ -553,12 +537,12 @@ contract Babylon is IBEP20, Auth {
         
         _balances[sender] = _balances[sender].sub(amount, "Insufficient Balance");        
         //buy map handling
-        if (recipient != pair ) //exclude pair from hadling
-            addBuyRecord(recipient,amount);
+        if (recipient != pair ) //exclude pair from handling
+            modifyHodlingTimestamp(recipient,amount);
         //assume max period
         uint256 _hodlingDays = minHoldingDays;
-        if (sender != pair ) //exclude pair from hadling
-            _hodlingDays = consumeBuyRecord(sender, amount) ;
+        if (sender != pair ) //exclude pair from handling
+            _hodlingDays = getHodlingDays(sender, amount) ;
         //end buy map handling        
         uint256 amountReceived = shouldTakeFee(sender) ? takeFee(sender, recipient, amount,_hodlingDays) : amount;
 
@@ -586,74 +570,38 @@ contract Babylon is IBEP20, Auth {
         require(amount <= _maxTxAmount || isTxLimitExempt[sender], "TX Limit Exceeded");
     }
 
-    //Handle Buy Queue
-    function addBuyRecord(address holder, uint256 amount)   internal returns (uint256) {
-         BuyRecord memory buyRecord = BuyRecord(block.timestamp ,amount);
-         _buyRecords[holder].push(buyRecord);
+    //Handle Hodling timestamp
+    function modifyHodlingTimestamp(address holder, uint256 amount)   internal returns (uint256) {
+        uint256 currentBalance   = _balances[holder];
+        if (currentBalance > 0 && amount > 0 ) {        
+            uint256 lastTimeStamp = _buyRecords[holder] ;
+            //time factor
+            uint256 newBalance = amount.add(currentBalance) ;
+            //lastTimeStamp + (amount/newBalance) * (block.timestamp - lastTimeStamp)
+            uint256 newTimeStamp = lastTimeStamp.add( (( amount.mul(_totalSupply).div(newBalance) ) * (block.timestamp.sub(lastTimeStamp))).div(_totalSupply)) ;                                   
+            _buyRecords[holder] = newTimeStamp ;
+        } else { //first buy !! 
+             _buyRecords[holder] = block.timestamp  ;
+        }
+        //
          return amount;
     }
 
-    function consumeBuyRecord(address holder, uint256 amount)   internal returns (uint256) {
+    function getHodlingDays(address holder, uint256 amount)   internal view returns (uint256) {
         //
-        if (amount == 0 || _buyRecords[holder].length == 0)
+        uint256 lastTimeStamp = _buyRecords[holder] ;
+        if (amount == 0 || lastTimeStamp == 0)
             return minHoldingDays;  // max days
-        
-        uint256 consumeArrayLength = 0 ;
-        uint256 rem  = amount ;
-        uint256 toConsume  = 0 ;
-        //first get array length (resultCount)
-        for (uint i = 0; i < _buyRecords[holder].length; i++) {
-         if ( _buyRecords[holder][i].amount > 0 ) {
-             toConsume =  _buyRecords[holder][i].amount > rem ?  rem : _buyRecords[holder][i].amount ;
-             rem = rem.sub(toConsume);
-             consumeArrayLength++;
-             //stop if total sell amount fully consumed
-             if (rem <= 0 )
-              break ;
-         }
-        }
-        //no buy history !
-        if (consumeArrayLength == 0)
-            return minHoldingDays;  // max days
-        
-        uint256 remFinal  = amount ;
-        uint256 toConsumeFinal  = 0 ;
-        uint256 consumeIndex = 0 ;
-        //consume array
-        BuyRecord[] memory  consumeArray = new BuyRecord[](consumeArrayLength) ;
-        uint256 totalAmountConsumed = 0;
-        //consume buy records
-        for (uint i = 0; i < _buyRecords[holder].length; i++) {
-         if ( _buyRecords[holder][i].amount > 0 ) {
-            toConsumeFinal =  _buyRecords[holder][i].amount > remFinal ?  remFinal : _buyRecords[holder][i].amount ;
-             _buyRecords[holder][i].amount =  _buyRecords[holder][i].amount.sub(toConsumeFinal);
-             remFinal = remFinal.sub(toConsumeFinal);
-             //append to consume array
-             consumeArray[consumeIndex] = BuyRecord( block.timestamp -  _buyRecords[holder][i].timestamp , toConsumeFinal);
-             totalAmountConsumed = totalAmountConsumed.add(toConsumeFinal);
-             consumeIndex = consumeIndex.add(1);
-              //stop if total sell amount fully consumed
-             if (remFinal <= 0 )
-              break ;
-         }
-        }
-
-       //get final days
-       uint256 _days = 0;
-       for (uint i = 0; i < consumeArray.length; i++) {
-           //get days as percentage of total consumed amount
-          _days = _days.add (  consumeArray[i].amount.mul(consumeArray[i].timestamp.div(60*60*24)).div(totalAmountConsumed) );
-       }
-
-       //Should not happended
-       if (_days > minHoldingDays )
-        _days =  minHoldingDays;
-       //
-
-       return _days;
-
+        //
+        uint256 secondsFromLastBuy = block.timestamp.sub(lastTimeStamp) ;
+        uint256 _days = secondsFromLastBuy.div(60*60*24) ;
+        //Should not happended
+        if (_days > minHoldingDays )
+            _days =  minHoldingDays;
+        //
+        return _days ;
     }
-    //end Handle Buy Queue
+    //end Hodling timestamp
 
     function shouldTakeFee(address sender) internal view returns (bool) {
         return !isFeeExempt[sender];
@@ -736,18 +684,13 @@ contract Babylon is IBEP20, Auth {
         && address(this).balance >= autoBuybackAmount;
     }
 
-    function triggerZeusBuyback(uint256 amount, bool triggerBuybackMultiplier) external authorized {
-        buyTokens(amount, DEAD);
-        if(triggerBuybackMultiplier){
-            buybackMultiplierTriggeredAt = block.timestamp;
-            emit BuybackMultiplierActive(buybackMultiplierLength);
-        }
+    function triggerZeusBuyback(uint256 amount) external authorized {        
+        require(address(this).balance >= amount.mul(2) , "Not engouh balance! , should at most half the contract balance");
+        //require(!inSwap , "please wait until current swap finished");
+        buyTokens(amount, DEAD);    
     }
 
-    function clearBuybackMultiplier() external authorized {
-        buybackMultiplierTriggeredAt = 0;
-    }
-
+    
     function triggerAutoBuyback() internal {
         buyTokens(autoBuybackAmount, DEAD);
         autoBuybackBlockLast = block.number;
@@ -759,7 +702,7 @@ contract Babylon is IBEP20, Auth {
         address[] memory path = new address[](2);
         path[0] = WBNB;
         path[1] = address(this);
-
+        //
         router.swapExactETHForTokensSupportingFeeOnTransferTokens{value: amount}(
             0,
             path,
@@ -769,6 +712,7 @@ contract Babylon is IBEP20, Auth {
     }
 
     function setAutoBuybackSettings(bool _enabled, uint256 _cap, uint256 _amount, uint256 _period) external authorized {
+        require( autoBuybackCap >= autoBuybackAmount , "Cap can't be less than Amt");
         autoBuybackEnabled = _enabled;
         autoBuybackCap = _cap;
         autoBuybackAccumulator = 0;
@@ -778,30 +722,14 @@ contract Babylon is IBEP20, Auth {
     }
 
     function setSellTaxSettings(bool _sellTaxEnabled, uint256 _minHoldingDays, uint256 _sellTaxDayFee) external authorized {     
-        require(_minHoldingDays <= minHoldingDaysUpperLimit && _sellTaxDayFee <= sellTaxDayFeeUpperLimit );        
+        require(_minHoldingDays <= minHoldingDaysUpperLimit && _sellTaxDayFee <= sellTaxDayFeeUpperLimit , "Should not exceeded upper limits" );        
         //
         sellTaxEnabled = _sellTaxEnabled;
         minHoldingDays = _minHoldingDays ;      
         sellTaxDayFee = _sellTaxDayFee ; 
     }
 
-    function setBuybackMultiplierSettings(uint256 numerator, uint256 denominator, uint256 length) external authorized {
-        require(numerator / denominator <= 2 && numerator > denominator);
-        buybackMultiplierNumerator = numerator;
-        buybackMultiplierDenominator = denominator;
-        buybackMultiplierLength = length;
-    }
-
-    function launched() internal view returns (bool) {
-        return launchedAt != 0;
-    }
-
-    function launch() public authorized {
-        require(launchedAt == 0, "Already launched boi");
-        launchedAt = block.number;
-        launchedAtTimestamp = block.timestamp;
-    }
-
+  
     function setTxLimit(uint256 amount) external authorized {
         require(amount >= _totalSupply / 1000);
         _maxTxAmount = amount;
@@ -871,6 +799,5 @@ contract Babylon is IBEP20, Auth {
         return getLiquidityBacking(accuracy) > target;
     }
 
-    event AutoLiquify(uint256 amountBNB, uint256 amountBOG);
-    event BuybackMultiplierActive(uint256 duration);
+    event AutoLiquify(uint256 amountBNB, uint256 amountBOG);    
 }
