@@ -236,8 +236,8 @@ contract DividendDistributor is IDividendDistributor {
         uint256 totalRealised;
     }
 
-    IBEP20 BUSD = IBEP20(0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7); // 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56
-    address WBNB = 0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd;//0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    IBEP20 BUSD = IBEP20(0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56); //
+    address WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;//
     IDEXRouter router;
 
     address[] shareholders;
@@ -271,7 +271,7 @@ contract DividendDistributor is IDividendDistributor {
     constructor (address _router) {
         router = _router != address(0)
         ? IDEXRouter(_router)
-        : IDEXRouter(0x9Ac64Cc6e4415144C455BD8E4837Fea55603e5c3); //0x10ED43C718714eb63d5aA57B78B54704E256024E
+        : IDEXRouter(0x10ED43C718714eb63d5aA57B78B54704E256024E); //
         _token = msg.sender;
     }
 
@@ -396,11 +396,10 @@ contract Babylon is IBEP20, Auth {
     using SafeMath for uint256;
 
     uint256 public constant MASK = type(uint128).max;
-    address BUSD = 0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7;//0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
-    address public WBNB = 0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd ;//0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
+    address BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;//;
+    address public WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c ;//;
     address DEAD = 0x000000000000000000000000000000000000dEaD;
-    address ZERO = 0x0000000000000000000000000000000000000000;
-    address DEAD_NON_CHECKSUM = 0x000000000000000000000000000000000000dEaD;
+    address ZERO = 0x0000000000000000000000000000000000000000;    
 
     string constant _name = "Babylon Coin";
     string constant _symbol = "BBL"; 
@@ -416,11 +415,12 @@ contract Babylon is IBEP20, Auth {
     mapping (address => bool) isTxLimitExempt;
     mapping (address => bool) isDividendExempt;
 
-    uint256 liquidityFee = 200;
-    uint256 buybackFee = 200;
-    uint256 reflectionFee = 500;
-    uint256 marketingFee = 100;
-    uint256 totalFee = 1000;
+    uint256 liquidityFee   =   200;
+    uint256 buybackFee     =   200;
+    uint256 reflectionFee  =   400;
+    uint256 marketingFee   =   100;
+    uint256 charityFee     =   100;
+    uint256 totalFee       =  1000;
     uint256 feeDenominator = 10000;
     
     //Sell Tax (Holding based Tax)
@@ -435,6 +435,7 @@ contract Babylon is IBEP20, Auth {
     //
     address public autoLiquidityReceiver;
     address public marketingFeeReceiver;
+    address public charityFeeReceiver;
 
     uint256 targetLiquidity = 25;
     uint256 targetLiquidityDenominator = 100;
@@ -481,6 +482,7 @@ contract Babylon is IBEP20, Auth {
 
         autoLiquidityReceiver = msg.sender;
         marketingFeeReceiver = msg.sender;
+        charityFeeReceiver = msg.sender;
 
         approve(_dexRouter, _totalSupply);
         approve(address(pair), _totalSupply);
@@ -658,11 +660,13 @@ contract Babylon is IBEP20, Auth {
         uint256 amountBNBLiquidity = amountBNB.mul(dynamicLiquidityFee).div(totalBNBFee).div(2);
         uint256 amountBNBReflection = amountBNB.mul(reflectionFee).div(totalBNBFee);
         uint256 amountBNBMarketing = amountBNB.mul(marketingFee).div(totalBNBFee);
+        uint256 amountBNBCharity = amountBNB.mul(charityFee).div(totalBNBFee);
 
         try distributor.deposit{value: amountBNBReflection}() {} catch {}
         payable(marketingFeeReceiver).transfer(amountBNBMarketing);
-           
-
+        //
+        payable(charityFeeReceiver).transfer(amountBNBCharity);
+        //   
         if(amountToLiquify > 0){
             router.addLiquidityETH{value: amountBNBLiquidity}(
                 address(this),
@@ -753,19 +757,21 @@ contract Babylon is IBEP20, Auth {
         isTxLimitExempt[holder] = exempt;
     }
 
-    function setFees(uint256 _liquidityFee, uint256 _buybackFee, uint256 _reflectionFee, uint256 _marketingFee, uint256 _feeDenominator) external authorized {
+    function setFees(uint256 _liquidityFee, uint256 _buybackFee, uint256 _reflectionFee, uint256 _marketingFee,uint256 _charityFee, uint256 _feeDenominator) external authorized {
         liquidityFee = _liquidityFee;
         buybackFee = _buybackFee;
         reflectionFee = _reflectionFee;
         marketingFee = _marketingFee;
-        totalFee = _liquidityFee.add(_buybackFee).add(_reflectionFee).add(_marketingFee);
+        charityFee = _charityFee ;
+        totalFee = _liquidityFee.add(_buybackFee).add(_reflectionFee).add(_marketingFee).add(_charityFee);
         feeDenominator = _feeDenominator;
         require(totalFee < feeDenominator/4);
     }
 
-    function setFeeReceivers(address _autoLiquidityReceiver, address _marketingFeeReceiver) external authorized {
+    function setFeeReceivers(address _autoLiquidityReceiver, address _marketingFeeReceiver ,address _charityFeeReceiver) external authorized {
         autoLiquidityReceiver = _autoLiquidityReceiver;
         marketingFeeReceiver = _marketingFeeReceiver;
+        charityFeeReceiver = _charityFeeReceiver;
     }
 
     function setSwapBackSettings(bool _enabled, uint256 _amount) external authorized {
